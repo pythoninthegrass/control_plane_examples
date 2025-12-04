@@ -1,0 +1,634 @@
+openapi: 3.0.3
+info:
+  title: Task Dispatcher API
+  description: |
+    A self-hosted task queue and scheduler service that replicates Google Cloud Tasks functionality.
+
+    ## Features
+    - HTTP-based task enqueuing with automatic retry
+    - Delayed/scheduled task execution
+    - Per-client rate limiting with tier system
+    - Multi-queue support with priority levels
+
+    ## Authentication
+    - **Admin endpoints** require `X-Admin-Key` header (when `ADMIN_API_KEY` is configured)
+    - **Task endpoints** use `client_id` for identification and rate limiting
+
+    ## Rate Limiting
+    Rate limits are enforced per client based on their tier:
+    - `free`: 10 req/min, 1 concurrent
+    - `basic`: 100 req/min, 5 concurrent
+    - `premium`: 1,000 req/min, 20 concurrent
+    - `enterprise`: 5,000 req/min, 50 concurrent
+
+    Rate limit headers are included in all `/v1/enqueue` responses.
+  version: 1.0.0
+  contact:
+    name: Task Dispatcher
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: Tasks
+    description: Task enqueue operations
+  - name: Admin
+    description: Client and configuration management
+  - name: Health
+    description: Health and monitoring endpoints
+
+paths:
+  /v1/enqueue:
+    post:
+      tags:
+        - Tasks
+      summary: Enqueue a task
+      description: |
+        Enqueue an HTTP request to be executed asynchronously by a worker.
+        The task will be retried automatically on failure (5xx or 429 responses).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnqueueRequest'
+            examples:
+              simple:
+                summary: Simple POST request
+                value:
+                  client_id: "my-service"
+                  queue: "default"
+                  task:
+                    url: "https://api.example.com/webhook"
+                    method: "POST"
+                    headers:
+                      Content-Type: "application/json"
+                    body: '{"event": "user.created", "user_id": "123"}'
+              delayed:
+                summary: Delayed task (30 seconds)
+                value:
+                  client_id: "my-service"
+                  queue: "default"
+                  delay: 30
+                  task:
+                    url: "https://api.example.com/reminder"
+                    method: "POST"
+              high_priority:
+                summary: High priority task
+                value:
+                  client_id: "my-service"
+                  queue: "critical"
+                  task:
+                    url: "https://api.example.com/urgent"
+                    method: "POST"
+      responses:
+        '201':
+          description: Task enqueued successfully
+          headers:
+            X-RateLimit-Limit:
+              schema:
+                type: integer
+              description: Maximum requests per minute
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+              description: Remaining requests in current window
+            X-RateLimit-Reset:
+              schema:
+                type: integer
+              description: Unix timestamp when the rate limit resets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnqueueResponse'
+        '400':
+          description: Invalid request (bad JSON, invalid URL, invalid queue name)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Client validation failed (disabled or invalid client_id format)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Queue access denied (client not allowed to use this queue)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Request body too large (max 1MB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds until rate limit resets
+            X-RateLimit-Limit:
+              schema:
+                type: integer
+              description: Maximum requests per minute
+            X-RateLimit-Reset:
+              schema:
+                type: integer
+              description: Unix timestamp when the rate limit resets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RateLimitError'
+
+  /admin/clients:
+    get:
+      tags:
+        - Admin
+      summary: List all clients
+      description: Returns all registered client configurations
+      security:
+        - AdminKey: []
+      responses:
+        '200':
+          description: List of clients
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  clients:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ClientConfig'
+                  count:
+                    type: integer
+                    description: Total number of clients
+        '401':
+          description: Unauthorized (missing or invalid admin key)
+
+  /admin/clients/set:
+    post:
+      tags:
+        - Admin
+      summary: Create or update a client
+      description: Creates a new client or updates an existing client's configuration
+      security:
+        - AdminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientConfigInput'
+            examples:
+              basic_client:
+                summary: Create basic tier client
+                value:
+                  client_id: "new-service"
+                  tier: "basic"
+                  enabled: true
+              enterprise_with_queues:
+                summary: Enterprise client with queue restrictions
+                value:
+                  client_id: "enterprise-service"
+                  tier: "enterprise"
+                  allowed_queues: ["critical", "default"]
+                  enabled: true
+      responses:
+        '200':
+          description: Client created/updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientConfig'
+        '400':
+          description: Invalid request (missing client_id or invalid format)
+        '401':
+          description: Unauthorized
+
+  /admin/clients/get:
+    get:
+      tags:
+        - Admin
+      summary: Get client configuration
+      description: Returns configuration for a specific client
+      security:
+        - AdminKey: []
+      parameters:
+        - name: client_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Client identifier
+      responses:
+        '200':
+          description: Client configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientConfig'
+        '400':
+          description: Missing client_id parameter
+        '401':
+          description: Unauthorized
+        '404':
+          description: Client not found
+
+  /admin/clients/delete:
+    delete:
+      tags:
+        - Admin
+      summary: Delete a client
+      description: Removes a client configuration
+      security:
+        - AdminKey: []
+      parameters:
+        - name: client_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Client identifier to delete
+      responses:
+        '204':
+          description: Client deleted successfully
+        '400':
+          description: Missing client_id parameter
+        '401':
+          description: Unauthorized
+
+  /admin/tiers:
+    get:
+      tags:
+        - Admin
+      summary: List available tiers
+      description: Returns all available rate limit tiers and their configurations
+      security:
+        - AdminKey: []
+      responses:
+        '200':
+          description: Available tiers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tiers:
+                    type: object
+                    additionalProperties:
+                      $ref: '#/components/schemas/RateConfig'
+              example:
+                tiers:
+                  free:
+                    max_concurrent: 1
+                    requests_per_min: 10
+                  basic:
+                    max_concurrent: 5
+                    requests_per_min: 100
+                  premium:
+                    max_concurrent: 20
+                    requests_per_min: 1000
+                  enterprise:
+                    max_concurrent: 50
+                    requests_per_min: 5000
+        '401':
+          description: Unauthorized
+
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Basic health check
+      description: Returns OK if the service is healthy (Redis connected, worker running)
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "OK"
+        '503':
+          description: Service is unhealthy
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Redis unhealthy"
+
+  /health/live:
+    get:
+      tags:
+        - Health
+      summary: Liveness probe
+      description: |
+        Returns OK if the process is alive. Use for Kubernetes livenessProbe.
+        This endpoint always returns 200 as long as the HTTP server is responding.
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "OK"
+
+  /health/ready:
+    get:
+      tags:
+        - Health
+      summary: Readiness probe
+      description: |
+        Returns OK if the service is ready to accept traffic. Use for Kubernetes readinessProbe.
+        Checks Redis connectivity and worker health.
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "OK"
+        '503':
+          description: Service is not ready
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Redis unhealthy"
+
+  /health/detailed:
+    get:
+      tags:
+        - Health
+      summary: Detailed health status
+      description: Returns detailed health information including component status and version
+      responses:
+        '200':
+          description: Detailed health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetailedHealth'
+        '503':
+          description: Service is unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetailedHealth'
+
+  /version:
+    get:
+      tags:
+        - Health
+      summary: Version information
+      description: Returns build version, commit hash, and build time
+      responses:
+        '200':
+          description: Version information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Version'
+
+  /metrics:
+    get:
+      tags:
+        - Health
+      summary: Prometheus metrics
+      description: Returns Prometheus-formatted metrics for monitoring
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    AdminKey:
+      type: apiKey
+      in: header
+      name: X-Admin-Key
+      description: Admin API key (set via ADMIN_API_KEY environment variable)
+
+  schemas:
+    EnqueueRequest:
+      type: object
+      required:
+        - client_id
+        - task
+      properties:
+        client_id:
+          type: string
+          description: Client identifier (3-64 alphanumeric chars, hyphens, underscores)
+          pattern: '^[a-zA-Z0-9_-]{3,64}$'
+          example: "my-service"
+        queue:
+          type: string
+          description: Queue name (default, critical, low)
+          default: "default"
+          example: "default"
+        delay:
+          type: integer
+          description: Delay in seconds before task execution
+          minimum: 0
+          default: 0
+          example: 30
+        rate_limit:
+          $ref: '#/components/schemas/RateConfig'
+        task:
+          $ref: '#/components/schemas/TaskPayload'
+
+    TaskPayload:
+      type: object
+      required:
+        - url
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Target URL (must be http or https, no internal IPs unless ALLOW_PRIVATE_URLS=true)
+          example: "https://api.example.com/webhook"
+        method:
+          type: string
+          enum: [GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS]
+          default: "GET"
+          description: HTTP method
+          example: "POST"
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: HTTP headers to send
+          example:
+            Content-Type: "application/json"
+            Authorization: "Bearer token123"
+        body:
+          type: string
+          description: Request body (for POST, PUT, PATCH)
+          example: '{"key": "value"}'
+
+    EnqueueResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "enqueued"
+        task_id:
+          type: string
+          description: Unique task identifier
+          example: "abc123def456"
+        queue:
+          type: string
+          example: "default"
+        client_id:
+          type: string
+          example: "my-service"
+        rate_limit:
+          $ref: '#/components/schemas/RateConfig'
+
+    RateConfig:
+      type: object
+      properties:
+        max_concurrent:
+          type: integer
+          description: Maximum concurrent tasks
+          example: 5
+        requests_per_min:
+          type: integer
+          description: Maximum requests per minute
+          example: 100
+
+    ClientConfig:
+      type: object
+      properties:
+        client_id:
+          type: string
+          example: "my-service"
+        tier:
+          type: string
+          enum: [free, basic, premium, enterprise, default]
+          example: "basic"
+        rate_limit:
+          $ref: '#/components/schemas/RateConfig'
+        allowed_queues:
+          type: array
+          items:
+            type: string
+          description: Queues this client can use (empty = all queues)
+          example: ["default", "critical"]
+        enabled:
+          type: boolean
+          description: Whether client is enabled
+          example: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ClientConfigInput:
+      type: object
+      required:
+        - client_id
+      properties:
+        client_id:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]{3,64}$'
+          example: "my-service"
+        tier:
+          type: string
+          enum: [free, basic, premium, enterprise]
+          example: "basic"
+        rate_limit:
+          $ref: '#/components/schemas/RateConfig'
+        allowed_queues:
+          type: array
+          items:
+            type: string
+          example: ["default"]
+        enabled:
+          type: boolean
+          default: true
+
+    DetailedHealth:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, unhealthy]
+          example: "healthy"
+        mode:
+          type: string
+          enum: [api, worker, both]
+          example: "both"
+        timestamp:
+          type: string
+          format: date-time
+        version:
+          type: string
+          example: "1.0.0"
+        commit:
+          type: string
+          example: "abc1234"
+        buildTime:
+          type: string
+          example: "2024-01-15T10:30:00Z"
+        redis:
+          type: boolean
+          description: Redis connectivity status
+        worker:
+          type: boolean
+          description: Worker health status (only in worker/both mode)
+
+    Version:
+      type: object
+      properties:
+        version:
+          type: string
+          example: "1.0.0"
+        commit:
+          type: string
+          example: "abc1234"
+        buildTime:
+          type: string
+          example: "2024-01-15T10:30:00Z"
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+
+    RateLimitError:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "Rate limit exceeded"
+        message:
+          type: string
+          example: "exceeded 100 requests per minute (current: 101)"
+        client_id:
+          type: string
+          example: "my-service"
+        requests_per_min:
+          type: integer
+          example: 100
+        retry_after:
+          type: integer
+          description: Seconds until rate limit resets
+          example: 45

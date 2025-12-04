@@ -1,0 +1,18 @@
+# Use the official lightweight Alpine image for security and speed
+FROM redis:7-alpine
+
+# Define the volume for data persistence
+# This explicitly tells Docker that /data holds persistent information
+VOLUME /data
+
+# Expose the standard Redis port
+EXPOSE 6379
+
+# Add a Healthcheck to ensure the container is truly ready
+# It tries to ping Redis; if it fails, the container is marked 'unhealthy'
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+  CMD redis-cli ping | grep PONG || exit 1
+
+# Start Redis with Append Only File (AOF) enabled.
+# 'appendonly yes' ensures every write is logged to disk immediately.
+CMD ["redis-server", "--appendonly", "yes"]

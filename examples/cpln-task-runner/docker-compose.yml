@@ -1,0 +1,100 @@
+services:
+  # API Server (handles HTTP requests, enqueues tasks)
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - MODE=api
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - ADMIN_API_KEY=${ADMIN_API_KEY:-}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Use readiness probe for Docker health (checks Redis connectivity)
+      # For Kubernetes: use /health/live for livenessProbe, /health/ready for readinessProbe
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # Worker (processes tasks from queue)
+  worker:
+    build: .
+    environment:
+      - MODE=worker
+      - PORT=8082
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-10}
+      - TASK_TIMEOUT_SEC=${TASK_TIMEOUT_SEC:-1800}
+      - MAX_RETRY=${MAX_RETRY:-5}
+      - ALLOW_PRIVATE_URLS=${ALLOW_PRIVATE_URLS:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - CB_FAILURE_THRESHOLD=${CB_FAILURE_THRESHOLD:-5}
+      - CB_TIMEOUT_SEC=${CB_TIMEOUT_SEC:-30}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Use readiness probe (checks Redis + worker health)
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8082/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
+
+  # Redis (Persistence)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: >
+      sh -c '
+        if [ -n "$${REDIS_PASSWORD}" ]; then
+          redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"
+        else
+          redis-server --appendonly yes
+        fi
+      '
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # UI Dashboard (Asynqmon) - Similar to Cloud Console
+  ui:
+    image: hibiken/asynqmon
+    # Force Intel architecture emulation for Apple Silicon
+    platform: linux/amd64
+    ports:
+      - "8081:8080"
+    command: >
+      sh -c '
+        if [ -n "$${REDIS_PASSWORD}" ]; then
+          /asynqmon --redis-addr redis:6379 --redis-password "$${REDIS_PASSWORD}"
+        else
+          /asynqmon --redis-addr redis:6379
+        fi
+      '
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis_data:

@@ -1,0 +1,80 @@
+{{- if .Values.worker.enabled }}
+kind: workload
+name: {{ .Values.worker.name }}
+description: Task Runner Worker - Processes tasks from the queue
+spec:
+  type: serverless
+
+  identityLink: //gvc/{{ .Values.global.gvc }}/identity/{{ .Values.identity.name }}
+
+  containers:
+    - name: worker
+      image: {{ .Values.global.image.repository }}:{{ .Values.global.image.tag }}
+      port: {{ .Values.worker.port }}
+
+      cpu: {{ .Values.worker.resources.cpu | quote }}
+      memory: {{ .Values.worker.resources.memory | quote }}
+
+      env:
+        - name: MODE
+          value: "worker"
+        - name: PORT
+          value: {{ .Values.worker.port | quote }}
+        - name: REDIS_ADDR
+          value: {{ .Values.redis.address | quote }}
+        {{- if .Values.redis.password }}
+        - name: REDIS_PASSWORD
+          value: "cpln://secret/{{ .Values.secrets.name }}.redis-password"
+        {{- end }}
+        - name: LOG_LEVEL
+          value: {{ .Values.worker.env.logLevel | quote }}
+        - name: WORKER_CONCURRENCY
+          value: {{ .Values.worker.env.concurrency | quote }}
+        - name: TASK_TIMEOUT_SEC
+          value: {{ .Values.worker.env.taskTimeoutSec | quote }}
+        - name: MAX_RETRY
+          value: {{ .Values.worker.env.maxRetry | quote }}
+        - name: ALLOW_PRIVATE_URLS
+          value: {{ .Values.worker.env.allowPrivateUrls | quote }}
+        - name: CB_FAILURE_THRESHOLD
+          value: {{ .Values.worker.env.cbFailureThreshold | quote }}
+        - name: CB_TIMEOUT_SEC
+          value: {{ .Values.worker.env.cbTimeoutSec | quote }}
+        {{- if .Values.worker.env.otelEndpoint }}
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: {{ .Values.worker.env.otelEndpoint | quote }}
+        {{- end }}
+
+      readinessProbe:
+        httpGet:
+          path: /health/ready
+          port: {{ .Values.worker.port }}
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+
+      livenessProbe:
+        httpGet:
+          path: /health/live
+          port: {{ .Values.worker.port }}
+        initialDelaySeconds: 10
+        periodSeconds: 15
+        timeoutSeconds: 5
+        failureThreshold: 3
+
+  defaultOptions:
+    autoscaling:
+      metric: concurrency
+      target: 50
+      minScale: {{ .Values.worker.replicas.min }}
+      maxScale: {{ .Values.worker.replicas.max }}
+      scaleToZeroDelay: 300
+    capacityAI: false
+    timeoutSeconds: 60
+
+  # Worker is internal only - no public access
+  firewallConfig:
+    internal:
+      inboundAllowType: same-gvc
+{{- end }}

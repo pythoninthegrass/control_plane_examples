@@ -1,0 +1,79 @@
+{{- if .Values.api.enabled }}
+kind: workload
+name: {{ .Values.api.name }}
+description: Task Runner API - HTTP endpoint for enqueuing tasks
+spec:
+  type: serverless
+
+  identityLink: //gvc/{{ .Values.global.gvc }}/identity/{{ .Values.identity.name }}
+
+  containers:
+    - name: api
+      image: {{ .Values.global.image.repository }}:{{ .Values.global.image.tag }}
+      port: {{ .Values.api.port }}
+
+      cpu: {{ .Values.api.resources.cpu | quote }}
+      memory: {{ .Values.api.resources.memory | quote }}
+
+      env:
+        - name: MODE
+          value: "api"
+        - name: PORT
+          value: {{ .Values.api.port | quote }}
+        - name: REDIS_ADDR
+          value: {{ .Values.redis.address | quote }}
+        {{- if .Values.redis.password }}
+        - name: REDIS_PASSWORD
+          value: "cpln://secret/{{ .Values.secrets.name }}.redis-password"
+        {{- end }}
+        - name: LOG_LEVEL
+          value: {{ .Values.api.env.logLevel | quote }}
+        {{- if .Values.api.env.adminApiKey }}
+        - name: ADMIN_API_KEY
+          value: "cpln://secret/{{ .Values.secrets.name }}.admin-api-key"
+        {{- end }}
+        {{- if .Values.api.env.otelEndpoint }}
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: {{ .Values.api.env.otelEndpoint | quote }}
+        {{- end }}
+
+      readinessProbe:
+        httpGet:
+          path: /health/ready
+          port: {{ .Values.api.port }}
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+
+      livenessProbe:
+        httpGet:
+          path: /health/live
+          port: {{ .Values.api.port }}
+        initialDelaySeconds: 10
+        periodSeconds: 15
+        timeoutSeconds: 5
+        failureThreshold: 3
+
+  defaultOptions:
+    autoscaling:
+      metric: concurrency
+      target: 100
+      minScale: {{ .Values.api.replicas.min }}
+      maxScale: {{ .Values.api.replicas.max }}
+      scaleToZeroDelay: 300
+    capacityAI: false
+    timeoutSeconds: 30
+
+  firewallConfig:
+    {{- if .Values.api.public.enabled }}
+    external:
+      inboundAllowCIDR:
+        - 0.0.0.0/0
+      {{- if .Values.api.public.pathPrefix }}
+      outboundAllowHostname: []
+      {{- end }}
+    {{- end }}
+    internal:
+      inboundAllowType: same-gvc
+{{- end }}

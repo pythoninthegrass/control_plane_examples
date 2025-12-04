@@ -1,0 +1,120 @@
+# Control Plane Task Runner - Values
+# A self-hosted task queue and scheduler service
+
+# =============================================================================
+# Global Settings
+# =============================================================================
+global:
+  # GVC name (auto-populated by Control Plane)
+  gvc: ""
+  # Location for workloads
+  location: ""
+  # Image repository and tag
+  image:
+    repository: ""  # Required: your container registry path
+    tag: "1.0.0"
+
+# =============================================================================
+# Redis Configuration (External)
+# =============================================================================
+redis:
+  # Redis connection address (e.g., redis:6379 or your-redis.example.com:6379)
+  address: "redis:6379"
+  # Redis password (leave empty if no authentication)
+  password: ""
+
+# =============================================================================
+# API Workload Configuration
+# =============================================================================
+api:
+  # Enable/disable the API workload
+  enabled: true
+
+  # Workload name
+  name: "task-runner-api"
+
+  # Number of replicas
+  replicas:
+    min: 1
+    max: 3
+
+  # Container port
+  port: 8080
+
+  # Public access configuration
+  public:
+    enabled: true
+    # Path prefix for public endpoint (empty for root)
+    pathPrefix: ""
+
+  # Resource allocation
+  resources:
+    cpu: "500m"
+    memory: "512Mi"
+
+  # Environment variables
+  env:
+    # Log level (debug, info, warn, error)
+    logLevel: "info"
+    # Admin API key for protected endpoints (leave empty to disable admin auth)
+    adminApiKey: ""
+    # OpenTelemetry endpoint (leave empty to disable tracing)
+    otelEndpoint: ""
+
+# =============================================================================
+# Worker Workload Configuration
+# =============================================================================
+worker:
+  # Enable/disable the Worker workload
+  enabled: true
+
+  # Workload name
+  name: "task-runner-worker"
+
+  # Number of replicas
+  replicas:
+    min: 1
+    max: 5
+
+  # Container port (for health checks)
+  port: 8082
+
+  # Resource allocation
+  resources:
+    cpu: "1000m"
+    memory: "1Gi"
+
+  # Environment variables
+  env:
+    # Log level (debug, info, warn, error)
+    logLevel: "info"
+    # Number of concurrent workers per replica
+    concurrency: 10
+    # Task timeout in seconds (default: 30 minutes)
+    taskTimeoutSec: 1800
+    # Maximum retry attempts
+    maxRetry: 5
+    # Allow tasks to target private/internal URLs
+    allowPrivateUrls: false
+    # Circuit breaker failure threshold
+    cbFailureThreshold: 5
+    # Circuit breaker timeout in seconds
+    cbTimeoutSec: 30
+    # OpenTelemetry endpoint (leave empty to disable tracing)
+    otelEndpoint: ""
+
+# =============================================================================
+# Identity Configuration
+# =============================================================================
+identity:
+  # Identity name for workloads
+  name: "task-runner-identity"
+
+# =============================================================================
+# Secrets Configuration
+# =============================================================================
+secrets:
+  # Name of the secret containing sensitive values
+  name: "task-runner-secrets"
+  # Whether to create the secret (false if using external secret management)
+  create: true
