@@ -1,3 +1,0 @@
-kind: identity
-name: {{ .Values.identity.name }}
-description: Identity for Task Runner workloads
