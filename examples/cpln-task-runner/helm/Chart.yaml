@@ -1,7 +1,0 @@
-apiVersion: v2
-name: cpln-task-runner
-description: A task runner helm chart for Control Plane with Redis Sentinel support
-type: application
-version: 0.1.0
-appVersion: "1.0.0"
-
