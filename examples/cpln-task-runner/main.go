@@ -163,8 +163,10 @@ var (
 
 // --- Configuration ---
 var (
-	RedisAddr        = getEnv("REDIS_ADDR", "localhost:6379")
-	RedisPassword    = getEnv("REDIS_PASSWORD", "")
+	RedisPassword      = getEnv("REDIS_PASSWORD", "")
+	RedisMasterName    = getEnv("REDIS_MASTER_NAME", "mymaster")
+	RedisSentinelAddr  = getEnv("REDIS_SENTINEL_ADDR", "localhost:26379")
+	RedisSentinelPass  = getEnv("REDIS_SENTINEL_PASSWORD", "")
 	Port             = getEnv("PORT", "8080")
 	AdminAPIKey      = getEnv("ADMIN_API_KEY", "")
 	Concurrency      = getEnvInt("WORKER_CONCURRENCY", 10)
@@ -665,33 +667,38 @@ func main() {
 		"tracing", TracingEnabled,
 	)
 
-	// 1. Initialize Redis client for rate limiting with connection pooling
-	redisClient = redis.NewClient(&redis.Options{
-		Addr:         RedisAddr,
-		Password:     RedisPassword,
-		PoolSize:     100,
-		MinIdleConns: 10,
-		DialTimeout:  5 * time.Second,
-		ReadTimeout:  3 * time.Second,
-		WriteTimeout: 3 * time.Second,
+	// 1. Initialize Redis client for rate limiting with connection pooling (via Sentinel)
+	redisClient = redis.NewFailoverClient(&redis.FailoverOptions{
+		MasterName:       RedisMasterName,
+		SentinelAddrs:    []string{RedisSentinelAddr},
+		Password:         RedisPassword,
+		SentinelPassword: RedisSentinelPass,
+		DB:               0,
+		PoolSize:         100,
+		MinIdleConns:     10,
+		DialTimeout:      5 * time.Second,
+		ReadTimeout:      3 * time.Second,
+		WriteTimeout:     3 * time.Second,
 	})
 	defer redisClient.Close()
 
 	// Verify Redis connection
 	if err := redisClient.Ping(ctx).Err(); err != nil {
-		slog.Error("Failed to connect to Redis", "addr", RedisAddr, "error", err)
+		slog.Error("Failed to connect to Redis via Sentinel", "master", RedisMasterName, "sentinel", RedisSentinelAddr, "error", err)
 		os.Exit(1)
 	}
-	slog.Info("Connected to Redis", "addr", RedisAddr)
+	slog.Info("Connected to Redis via Sentinel", "master", RedisMasterName, "sentinel", RedisSentinelAddr)
 
-	// 2. Setup Asynq Redis Connection
-	redisOpt := asynq.RedisClientOpt{
-		Addr:     RedisAddr,
-		Password: RedisPassword,
+	// 2. Setup Asynq Redis Connection (via Sentinel)
+	asynqOpt := asynq.RedisFailoverClientOpt{
+		MasterName:       RedisMasterName,
+		SentinelAddrs:    []string{RedisSentinelAddr},
+		Password:         RedisPassword,
+		SentinelPassword: RedisSentinelPass,
 	}
 
 	// 3. Create Asynq Inspector for queue metrics
-	asynqInspector = asynq.NewInspector(redisOpt)
+	asynqInspector = asynq.NewInspector(asynqOpt)
 	defer asynqInspector.Close()
 
 	// Register queue metrics collector
@@ -702,16 +709,16 @@ func main() {
 	var srv *asynq.Server
 	var httpServer *http.Server
 
-	// 3. Setup Asynq Client (needed for API mode)
+	// 4. Setup Asynq Client (needed for API mode)
 	if Mode == "api" || Mode == "both" {
-		client = asynq.NewClient(redisOpt)
+		client = asynq.NewClient(asynqOpt)
 		defer client.Close()
 	}
 
-	// 4. Setup Asynq Server (needed for Worker mode)
+	// 5. Setup Asynq Server (needed for Worker mode)
 	if Mode == "worker" || Mode == "both" {
 		srv = asynq.NewServer(
-			redisOpt,
+			asynqOpt,
 			asynq.Config{
 				Concurrency: Concurrency,
 				Queues: map[string]int{
@@ -1020,13 +1027,11 @@ func handleEnqueue(w http.ResponseWriter, r *http.Request, client *asynq.Client)
 		return
 	}
 
-	// Define Task Options with Group-based concurrency control
+	// Define Task Options
 	opts := []asynq.Option{
 		asynq.Queue(req.Queue),
 		asynq.MaxRetry(MaxRetry),
 		asynq.Timeout(time.Duration(TaskTimeout) * time.Second),
-		// Group by client_id for per-client concurrency control
-		asynq.Group(fmt.Sprintf("client:%s", req.ClientID)),
 	}
 
 	if req.DelaySec > 0 {

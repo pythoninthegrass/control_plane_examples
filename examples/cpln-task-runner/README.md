@@ -1,10 +1,10 @@
 # Task Dispatcher
 
-A **self-hosted task queue and scheduler service** that mimics **Google Cloud Tasks** functionality, built with Go and Redis. This is designed as a drop-in replacement for Cloud Tasks when you want more control, flexibility, or cost savings.
+A **self-hosted task queue and scheduler service** that mimics **Google Cloud Tasks** functionality, built with Go and Redis Sentinel. This is designed as a drop-in replacement for Cloud Tasks when you want more control, flexibility, or cost savings.
 
 ## Overview
 
-Task Dispatcher accepts HTTP requests to enqueue background jobs, stores them in Redis, and processes them asynchronously by making HTTP calls to target endpoints. It supports delayed execution, priority queues, automatic retries, and concurrency control.
+Task Dispatcher accepts HTTP requests to enqueue background jobs, stores them in Redis (via Sentinel for high availability), and processes them asynchronously by making HTTP calls to target endpoints. It supports delayed execution, priority queues, automatic retries, and rate limiting per client.
 
 ## Features
 
@@ -13,15 +13,19 @@ Task Dispatcher accepts HTTP requests to enqueue background jobs, stores them in
 - ✅ **Priority Queues** - critical, default, and low priority levels
 - ✅ **Automatic Retries** - up to 5 retries with exponential backoff
 - ✅ **Task Timeouts** - 30-minute default timeout per task
+- ✅ **Redis Sentinel** - high availability with automatic master failover
+- ✅ **Per-Client Rate Limiting** - sliding window rate limits per client
+- ✅ **Circuit Breaker** - per-host circuit breaker for downstream protection
 - ✅ **Web Dashboard** - Asynqmon UI for monitoring (port 8081)
-- ✅ **Redis Persistence** - AOF enabled for durability
 - ✅ **Docker & Docker Compose** support
-- ✅ **Health Check** endpoint
+- ✅ **Health Check** endpoints (liveness, readiness, detailed)
+- ✅ **Prometheus Metrics** - task and queue metrics at `/metrics`
+- ✅ **OpenTelemetry Tracing** - distributed tracing support
 
 ## Technology Stack
 
 - **Go 1.22** with [Asynq](https://github.com/hibiken/asynq) library
-- **Redis 7** for task storage and queue management
+- **Redis Sentinel** for high-availability task storage and queue management
 - **Docker** with multi-stage builds
 - **Asynqmon** for task monitoring dashboard
 
@@ -40,21 +44,27 @@ docker-compose logs -f dispatcherServices:
 
 ### Local Development
 
+```bash
 # Install dependencies
 go mod download
 
-# Run Redis locally
-docker run -d -p 6379:6379 redis:7-alpine
+# Run Redis Sentinel locally (see redis/sentinel example in this repo)
+# Or use docker-compose which includes Redis Sentinel
 
 # Run the application
-go run main.go## API Usage
+REDIS_SENTINEL_ADDR=localhost:26379 REDIS_MASTER_NAME=mymaster go run main.go
+```
+
+## API Usage
 
 ### Enqueue a Task
 
 **Endpoint**: `POST /v1/enqueue`
 
 **Request Body**:
+```json
 {
+  "client_id": "my-service",
   "queue": "default",
   "delay": 0,
   "task": {
@@ -66,15 +76,22 @@ go run main.go## API Usage
     },
     "body": "{\"message\": \"Hello from Task Dispatcher\"}"
   }
-}**Response**:
+}
+```
+
+**Response**:
+```json
 {
   "status": "enqueued",
   "task_id": "abc123-xyz789",
-  "queue": "default"
-}### Parameters
+  "queue": "default",
+  "client_id": "my-service"
+}
+```### Parameters
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `client_id` | string | **Required.** Client identifier for rate limiting (3-64 alphanumeric, hyphens, underscores) |
 | `queue` | string | Queue name: `critical`, `default`, or `low` |
 | `delay` | int | Delay in seconds before execution (0 = immediate) |
 | `task.url` | string | Target URL to call when task executes |
@@ -104,8 +121,27 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REDIS_ADDR` | `localhost:6379` | Redis server address |
+| `REDIS_SENTINEL_ADDR` | `localhost:26379` | Redis Sentinel address (use global internal endpoint) |
+| `REDIS_MASTER_NAME` | `mymaster` | Redis Sentinel master name |
+| `REDIS_PASSWORD` | `` | Redis authentication password |
+| `REDIS_SENTINEL_PASSWORD` | `` | Sentinel authentication password |
 | `PORT` | `8080` | API server port |
+| `MODE` | `both` | Run mode: `api`, `worker`, or `both` |
+| `WORKER_CONCURRENCY` | `10` | Number of concurrent workers |
+| `TASK_TIMEOUT_SEC` | `1800` | Task timeout in seconds (30 min default) |
+| `MAX_RETRY` | `5` | Maximum retry attempts per task |
+| `LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| `ADMIN_API_KEY` | `` | API key for admin endpoints |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `` | OpenTelemetry collector endpoint (enables tracing) |
+
+### Circuit Breaker Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CB_MAX_REQUESTS` | `3` | Max requests in half-open state |
+| `CB_INTERVAL_SEC` | `60` | Interval to clear failure counts |
+| `CB_TIMEOUT_SEC` | `30` | Time before circuit half-opens |
+| `CB_FAILURE_THRESHOLD` | `5` | Consecutive failures to open circuit |
 
 ## Task Processing Behavior
 
@@ -127,16 +163,38 @@ Access the Asynqmon dashboard at http://localhost:8081 to:
 
 ## Deployment
 
-### ControlPlane (cpln)
+### Control Plane (cpln)
 
+```bash
 # Build and push images
-./cpln-build.sh### Custom Deployment
+./cpln-build.sh
+```
+
+A Helm chart is provided in the `helm/` directory for deploying to Control Plane:
+
+```bash
+# Deploy using helm template
+helm template task-runner ./helm -f ./helm/values.yaml | cpln apply -f -
+```
+
+### Custom Deployment
 
 The application can be deployed to any platform that supports Docker:
 
 1. Build the image: `docker build -t task-dispatcher .`
-2. Deploy Redis with persistence enabled
-3. Set `REDIS_ADDR` environment variable
+2. Deploy Redis Sentinel (see `redis/sentinel` example in this repo)
+3. Set `REDIS_SENTINEL_ADDR` and `REDIS_MASTER_NAME` environment variables
 4. Expose port 8080
+
+## Redis Sentinel
+
+This application **requires Redis Sentinel** for high availability. It does not support standalone Redis.
+
+Redis Sentinel provides:
+- **Automatic master discovery** - workers connect via Sentinel to find the current master
+- **Automatic failover** - if the master fails, Sentinel promotes a replica and workers reconnect automatically
+- **High availability** - no single point of failure for Redis
+
+When deploying on Control Plane, use the global internal endpoint for Sentinel (e.g., `redis-sentinel.mygvc.cpln.local:26379`) which load balances across all Sentinel replicas.
 
 ## Architecture
