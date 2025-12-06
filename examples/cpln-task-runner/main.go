@@ -163,10 +163,12 @@ var (
 
 // --- Configuration ---
 var (
-	RedisPassword      = getEnv("REDIS_PASSWORD", "")
-	RedisMasterName    = getEnv("REDIS_MASTER_NAME", "mymaster")
-	RedisSentinelAddr  = getEnv("REDIS_SENTINEL_ADDR", "localhost:26379")
-	RedisSentinelPass  = getEnv("REDIS_SENTINEL_PASSWORD", "")
+	RedisPassword       = getEnv("REDIS_PASSWORD", "")
+	RedisMasterName     = getEnv("REDIS_MASTER_NAME", "mymaster")
+	RedisSentinelAddr   = getEnv("REDIS_SENTINEL_ADDR", "localhost:26379")
+	RedisSentinelPass   = getEnv("REDIS_SENTINEL_PASSWORD", "")
+	RedisConnectRetries = getEnvInt("REDIS_CONNECT_RETRIES", 30)           // Max retries for initial connection
+	RedisRetryInterval  = getEnvInt("REDIS_RETRY_INTERVAL_SEC", 2)         // Seconds between retries
 	Port             = getEnv("PORT", "8080")
 	AdminAPIKey      = getEnv("ADMIN_API_KEY", "")
 	Concurrency      = getEnvInt("WORKER_CONCURRENCY", 10)
@@ -638,6 +640,44 @@ func initTracer(ctx context.Context) (func(context.Context) error, error) {
 	return tp.Shutdown, nil
 }
 
+// waitForRedis attempts to connect to Redis with retries
+// This handles the case where Redis Sentinel may not be ready when the app starts
+func waitForRedis(ctx context.Context, client *redis.Client) error {
+	retryInterval := time.Duration(RedisRetryInterval) * time.Second
+
+	for attempt := 1; attempt <= RedisConnectRetries; attempt++ {
+		err := client.Ping(ctx).Err()
+		if err == nil {
+			if attempt > 1 {
+				slog.Info("Redis connection established", "attempt", attempt)
+			}
+			return nil
+		}
+
+		if attempt == RedisConnectRetries {
+			return fmt.Errorf("failed after %d attempts: %w", attempt, err)
+		}
+
+		slog.Warn("Redis not ready, retrying...",
+			"attempt", attempt,
+			"max_attempts", RedisConnectRetries,
+			"retry_in_seconds", RedisRetryInterval,
+			"master", RedisMasterName,
+			"sentinel", RedisSentinelAddr,
+			"error", err,
+		)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryInterval):
+			// Continue to next attempt
+		}
+	}
+
+	return fmt.Errorf("max retries exceeded")
+}
+
 func main() {
 	initLogger()
 
@@ -682,9 +722,9 @@ func main() {
 	})
 	defer redisClient.Close()
 
-	// Verify Redis connection
-	if err := redisClient.Ping(ctx).Err(); err != nil {
-		slog.Error("Failed to connect to Redis via Sentinel", "master", RedisMasterName, "sentinel", RedisSentinelAddr, "error", err)
+	// Verify Redis connection with retries
+	if err := waitForRedis(ctx, redisClient); err != nil {
+		slog.Error("Failed to connect to Redis via Sentinel after retries", "master", RedisMasterName, "sentinel", RedisSentinelAddr, "error", err)
 		os.Exit(1)
 	}
 	slog.Info("Connected to Redis via Sentinel", "master", RedisMasterName, "sentinel", RedisSentinelAddr)

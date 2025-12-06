@@ -125,6 +125,8 @@ Environment variables:
 | `REDIS_MASTER_NAME` | `mymaster` | Redis Sentinel master name |
 | `REDIS_PASSWORD` | `` | Redis authentication password |
 | `REDIS_SENTINEL_PASSWORD` | `` | Sentinel authentication password |
+| `REDIS_CONNECT_RETRIES` | `30` | Max retries for initial Redis connection |
+| `REDIS_RETRY_INTERVAL_SEC` | `2` | Seconds between connection retries |
 | `PORT` | `8080` | API server port |
 | `MODE` | `both` | Run mode: `api`, `worker`, or `both` |
 | `WORKER_CONCURRENCY` | `10` | Number of concurrent workers |
